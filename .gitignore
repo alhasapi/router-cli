@@ -1,0 +1,11 @@
+/target
+
+# Pi harness state
+.pi/
+
+# Local secrets — never commit these
+.env
+.env.*
+!.env.example
+config.toml
+*.secret

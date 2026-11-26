@@ -1,0 +1,8 @@
+# Copy to ~/.config/router-cli/config.toml and fill in your password.
+# That file is git-ignored; never commit your real password.
+#
+# Alternatively, set the ROUTER_ADMIN_PASSWORD environment variable.
+
+base_url = "http://192.168.0.1"
+username = "admin"
+password = "CHANGE_ME"
