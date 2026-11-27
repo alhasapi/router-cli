@@ -35,10 +35,14 @@ struct Cli {
 enum Command {
     /// Reboot the router.
     Reboot,
-    /// Send a USSD code and print the response.
+    /// Send a USSD code and print the response (or cancel the active session).
     Ussd {
-        /// USSD code to dial, e.g. *100#
-        code: String,
+        /// USSD code to dial (e.g. *825#) or a menu option such as 1.
+        #[arg(required_unless_present = "cancel", conflicts_with = "cancel")]
+        code: Option<String>,
+        /// Cancel the active USSD session instead of dialing.
+        #[arg(long)]
+        cancel: bool,
     },
     /// Get or set WAN/LAN/WiFi configuration.
     Config {
@@ -92,7 +96,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Reboot => cmd_reboot(&session),
-        Command::Ussd { code } => cmd_ussd(&session, &code),
+        Command::Ussd { code, cancel } => cmd_ussd(&session, code.as_deref(), cancel),
         Command::Config { action } => cmd_config(&session, action),
         Command::Sms { action } => cmd_sms(&session, action),
     }
@@ -129,10 +133,33 @@ fn cmd_reboot(session: &Session) -> anyhow::Result<()> {
     }
 }
 
-fn cmd_ussd(session: &Session, code: &str) -> anyhow::Result<()> {
+fn cmd_ussd(session: &Session, code: Option<&str>, cancel: bool) -> anyhow::Result<()> {
     // Load the USSD page first (session-state guard, same as reboot).
     session.get("/ussd.htm").context("loading USSD page")?;
 
+    if cancel {
+        let body = session
+            .post_form(
+                "/boafrm/formUSSDSetup",
+                &[
+                    ("ussdValue", ""),
+                    ("selectMenuValue", ""),
+                    ("ussdStatusInput", "menu"),
+                    ("ussdCancelInput", "1"),
+                    ("submit-url", "/ussd.htm"),
+                ],
+            )
+            .context("cancelling USSD session")?;
+        session.get("/ussd.htm").context("checking USSD session")?;
+        if body.contains("var ussdStatus = '0'") {
+            println!("USSD session cancelled.");
+        } else {
+            println!("USSD cancel request sent (no open session reported).");
+        }
+        return Ok(());
+    }
+
+    let code = code.expect("clap requires a code unless --cancel is used");
     let body = session
         .post_form(
             "/boafrm/formUSSDSetup",
@@ -150,14 +177,23 @@ fn cmd_ussd(session: &Session, code: &str) -> anyhow::Result<()> {
         anyhow::bail!("session expired or rejected; try again");
     }
 
-    // The carrier response is rendered in one of these two divs.
-    let result = html::div_text(&body, "ussd_result_id").filter(|s| !s.is_empty());
-    let menu = html::div_text(&body, "ussd_menu_id").filter(|s| !s.is_empty());
+    // The carrier response is rendered in one of these two divs, with one
+    // device line per menu option.
+    let menu = html::div_lines(&body, "ussd_menu_id").unwrap_or_default();
+    let result = html::div_lines(&body, "ussd_result_id").unwrap_or_default();
+    let lines = if menu.is_empty() { result } else { menu };
 
-    match (result, menu) {
-        (Some(text), _) => println!("{text}"),
-        (None, Some(text)) => println!("{text}"),
-        (None, None) => println!("(no USSD response)"),
+    if lines.is_empty() {
+        println!("(no USSD response)");
+        return Ok(());
+    }
+    for line in &lines {
+        println!("{line}");
+    }
+    if lines.len() == 1 && lines[0] == "Unexpected Data Value" {
+        eprintln!(
+            "hint: an earlier USSD session may still be open — run `router-cli ussd --cancel` and dial again."
+        );
     }
     Ok(())
 }
@@ -287,6 +323,54 @@ mod tests {
 
         let cli = Cli::try_parse_from(["router-cli", "--username", "bob", "reboot"]).unwrap();
         assert_eq!(cli.username.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn ussd_takes_a_code() {
+        let cli = Cli::try_parse_from(["router-cli", "ussd", "*825#"]).unwrap();
+        let Command::Ussd { code, cancel } = cli.command else {
+            panic!("expected ussd");
+        };
+        assert_eq!(code.as_deref(), Some("*825#"));
+        assert!(!cancel);
+    }
+
+    #[test]
+    fn ussd_menu_reply_is_just_a_code() {
+        let cli = Cli::try_parse_from(["router-cli", "ussd", "1"]).unwrap();
+        let Command::Ussd { code, cancel } = cli.command else {
+            panic!("expected ussd");
+        };
+        assert_eq!(code.as_deref(), Some("1"));
+        assert!(!cancel);
+    }
+
+    #[test]
+    fn ussd_cancel_needs_no_code() {
+        let cli = Cli::try_parse_from(["router-cli", "ussd", "--cancel"]).unwrap();
+        let Command::Ussd { code, cancel } = cli.command else {
+            panic!("expected ussd");
+        };
+        assert!(code.is_none());
+        assert!(cancel);
+    }
+
+    #[test]
+    fn ussd_requires_a_code_or_cancel() {
+        let err = match Cli::try_parse_from(["router-cli", "ussd"]) {
+            Ok(_) => panic!("a code or --cancel is required"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn ussd_cancel_conflicts_with_code() {
+        let err = match Cli::try_parse_from(["router-cli", "ussd", "1", "--cancel"]) {
+            Ok(_) => panic!("--cancel should conflict with a code"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

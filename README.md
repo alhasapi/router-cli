@@ -38,8 +38,14 @@ clear error telling you where to set it.
 # Reboot (waits for the device to go down and come back)
 router-cli reboot
 
-# Send a USSD code and print the carrier response
-router-cli ussd '*100#'
+# Send a USSD code and print the carrier response (one device line per line)
+router-cli ussd '*825#'
+
+# Reply to an open USSD menu
+router-cli ussd 1
+
+# Drop a stuck USSD session (e.g. when the device answers "Unexpected Data Value")
+router-cli ussd --cancel
 
 # Read the last 5 received SMS messages (default: 10, newest first)
 router-cli sms list -n 5
@@ -61,6 +67,38 @@ router-cli config set wifi ssid0 MyWiFi
 ```
 
 Global options: `--base-url`, `--username`, `--password`.
+
+### USSD
+
+`router-cli ussd '<code>'` dials a USSD string and prints the device's response
+with its original line breaks: menus such as
+
+```text
+1) Forfaits Blue
+2) Autres services
+3) Mon compte
+4) Language
+```
+
+are printed one option per line (entities decoded, `<br>`/table markup and
+`&nbsp;` artifacts removed). While a session is open, pass the option itself to
+continue the dialogue:
+
+```sh
+router-cli ussd 1     # choose option 1
+router-cli ussd 0     # previous menu, when the carrier offers it
+```
+
+Sessions stay open on the device until the carrier closes them or you cancel.
+If a new dial answers with `Unexpected Data Value`, an earlier session is
+probably still active — cancel it and dial again:
+
+```sh
+router-cli ussd --cancel
+```
+
+`--cancel` takes no code and cannot be combined with one. The command does not
+auto-cancel before dialing, so replying to a menu keeps working.
 
 ### SMS
 
