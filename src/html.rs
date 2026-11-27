@@ -1,21 +1,5 @@
 //! Minimal HTML helpers for scraping the router's server-rendered pages.
 
-/// Strip HTML tags and common entities, then collapse whitespace.
-pub fn strip_html(s: &str) -> String {
-    let mut out = String::new();
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    let out = decode_entities(&out);
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// Decode the HTML entities the router emits (`&amp;`, `&#39;`, `&#NN;`, …).
 pub fn decode_entities(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -23,7 +7,17 @@ pub fn decode_entities(s: &str) -> String {
     while let Some(idx) = rest.find('&') {
         out.push_str(&rest[..idx]);
         let tail = &rest[idx..];
-        let Some(end) = tail.find(';').filter(|end| *end <= 10) else {
+        // Entities normally end with ';', but the router also emits `&nbsp`
+        // without one, so fall back to the known names in that case.
+        let end = tail
+            .find(';')
+            .filter(|end| *end <= 10)
+            .filter(|end| {
+                let name = &tail[1..*end];
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '#')
+            })
+            .or_else(|| named_entity_prefix(tail));
+        let Some(end) = end else {
             // Not an entity (or too far to be one): keep the ampersand.
             out.push('&');
             rest = &tail[1..];
@@ -50,7 +44,12 @@ pub fn decode_entities(s: &str) -> String {
         match translated {
             Some(c) => {
                 out.push(c);
-                rest = &tail[end + 1..];
+                // Without ';' only the name itself was consumed.
+                rest = if tail.as_bytes().get(end) == Some(&b';') {
+                    &tail[end + 1..]
+                } else {
+                    &tail[end..]
+                };
             }
             None => {
                 out.push('&');
@@ -60,6 +59,24 @@ pub fn decode_entities(s: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Length of a semicolon-less named entity at the start of `tail` (including
+/// the leading `&`), if it is followed by a non-alphanumeric character.
+fn named_entity_prefix(tail: &str) -> Option<usize> {
+    for name in ["nbsp", "quot", "apos", "amp", "lt", "gt"] {
+        let len = 1 + name.len();
+        if tail.len() >= len
+            && tail[1..].starts_with(name)
+            && !tail[len..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
+            return Some(len);
+        }
+    }
+    None
 }
 
 /// Remove `<script>...</script>` blocks so `document.write`'d markup inside JS
@@ -81,17 +98,98 @@ fn strip_scripts(html: &str) -> String {
     out
 }
 
-/// Extract the text content of a `<div id="...">` element.
-///
-/// The router's pages use flat divs (no nested divs), so the first `</div>`
-/// after the opening tag is the matching close.
-pub fn div_text(html: &str, id: &str) -> Option<String> {
-    let html = strip_scripts(html);
+/// Extract the inner HTML of a `<div id="...">`, matching nested divs.
+fn div_inner<'a>(html: &'a str, id: &str) -> Option<&'a str> {
     let marker = format!("id=\"{id}\"");
     let idx = html.find(&marker)?;
     let content_start = html[idx..].find('>')? + idx + 1;
-    let content_end = html[content_start..].find("</div>")? + content_start;
-    Some(strip_html(&html[content_start..content_end]))
+
+    let mut depth = 1usize;
+    let mut pos = content_start;
+    while pos < html.len() {
+        let open = html[pos..].find("<div").map(|i| pos + i);
+        let close = html[pos..].find("</div>").map(|i| pos + i);
+        match (open, close) {
+            (Some(open), Some(close)) if open < close => {
+                depth += 1;
+                pos = open + 4;
+            }
+            (_, Some(close)) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&html[content_start..close]);
+                }
+                pos = close + 6;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Extract `<div id="...">` text with its original line structure.
+///
+/// Block-level boundaries (`<br>`, table rows/cells, paragraphs, list items)
+/// become newlines; form controls are dropped; entities are decoded; runs of
+/// spaces/tabs are collapsed and blank lines removed. Used for USSD menus,
+/// where each option arrives on its own device line.
+pub fn div_lines(html: &str, id: &str) -> Option<Vec<String>> {
+    let html = strip_scripts(html);
+    let inner = div_inner(&html, id)?;
+    Some(text_lines(inner))
+}
+
+/// Convert an HTML fragment to display lines (see [`div_lines`]).
+pub fn text_lines(fragment: &str) -> Vec<String> {
+    let mut out = String::new();
+    let mut rest = fragment;
+
+    while let Some(idx) = rest.find('<') {
+        out.push_str(&rest[..idx]);
+        let after = &rest[idx + 1..];
+        let Some(end) = after.find('>') else {
+            // Unterminated tag: stop, keeping what came before it.
+            rest = "";
+            break;
+        };
+        let tag = after[..end].trim_start_matches('/').trim();
+        let name = tag
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let closing = after.starts_with('/');
+        let block = matches!(
+            (name.as_str(), closing),
+            ("br", _)
+                | ("p", _)
+                | ("div", _)
+                | ("table", _)
+                | ("tr", _)
+                | ("td", _)
+                | ("th", _)
+                | ("li", _)
+                | ("ul", _)
+                | ("ol", _)
+                | ("h1", _)
+                | ("h2", _)
+                | ("h3", _)
+                | ("h4", _)
+                | ("hr", _)
+        );
+        if block {
+            out.push('\n');
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+
+    let decoded = decode_entities(&out);
+    decoded
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect()
 }
 
 /// Extract a `name="..."` or `name=value` attribute from a tag. Handles both
@@ -221,17 +319,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_html_removes_tags_and_entities() {
-        assert_eq!(strip_html("<td>Hello&nbsp;World</td>"), "Hello World");
-    }
-
-    #[test]
-    fn div_text_extracts_content() {
-        let html = r#"<div id="ussd_menu_id"><table><td>Foo Bar</td></table></div>"#;
-        assert_eq!(div_text(html, "ussd_menu_id"), Some("Foo Bar".to_string()));
-    }
-
-    #[test]
     fn extracts_input_and_select_values() {
         let html = r#"<form>
             <input type="text" name="lan_ip" size="15" value="192.168.0.1">
@@ -258,5 +345,73 @@ mod tests {
     fn extracts_unquoted_attribute_value() {
         let html = r#"<input type="text" name="lan_ip" value=192.168.0.1 >"#;
         assert_eq!(field_value(html, "lan_ip"), Some("192.168.0.1".into()));
+    }
+
+    // Shape of the live /ussd.htm page after dialing *825# on the MC60.
+    const USSD_PAGE: &str = r#"<html><body onload="Load_Setting();">
+<script>var ussdStatus = '1';</script>
+<div id="ussd_result_id">
+<table class="block" border="0">
+<tr><th>&nbsp;</th><td width="50%">&nbsp</td></tr>
+</table>
+<div id="ussd_menu_id">
+<table width="100%">
+<tr>
+<td width="38%">&nbsp</td>
+<td>
+1) Forfaits Blue
+<br>
+2) Autres services
+<br>3) Mon compte&nbsp;
+<br><br>
+<input type="text" name="selectMenuValue" size="10" maxlength="30">
+</td>
+</tr>
+</table>
+</div>
+<BR>
+</div>
+</body></html>"#;
+
+    #[test]
+    fn div_lines_keeps_ussd_menu_lines() {
+        let lines = div_lines(USSD_PAGE, "ussd_menu_id").unwrap();
+        assert_eq!(
+            lines,
+            vec!["1) Forfaits Blue", "2) Autres services", "3) Mon compte",]
+        );
+    }
+
+    #[test]
+    fn div_lines_matches_nested_result_div() {
+        let lines = div_lines(USSD_PAGE, "ussd_result_id").unwrap();
+        assert_eq!(
+            lines,
+            vec!["1) Forfaits Blue", "2) Autres services", "3) Mon compte"]
+        );
+    }
+
+    #[test]
+    fn text_lines_decodes_entities_without_semicolons() {
+        assert_eq!(
+            text_lines("Menu&nbsp;principal<br>Solde:&nbsp;1&#39;000&nbsp;FCFA"),
+            vec!["Menu principal", "Solde: 1'000 FCFA"]
+        );
+        assert_eq!(text_lines("A &amp B &lt; C"), vec!["A & B < C"]);
+        // Unknown ampersand text is left alone.
+        assert_eq!(text_lines("R&D and &bogus;"), vec!["R&D and &bogus;"]);
+    }
+
+    #[test]
+    fn text_lines_drops_controls_and_blank_lines() {
+        let lines = text_lines(
+            "<table><tr><td>&nbsp</td><td>   </td></tr></table>\n<br>\n\n<p>Ok</p><input type=\"submit\" value=\"Send\">",
+        );
+        assert_eq!(lines, vec!["Ok"]);
+    }
+
+    #[test]
+    fn div_lines_missing_id_is_none() {
+        assert!(div_lines(USSD_PAGE, "nope_id").is_none());
     }
 }

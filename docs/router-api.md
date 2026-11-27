@@ -78,7 +78,7 @@ Device restarts (connection drops, then returns).
 
 | Field | Meaning |
 |-------|---------|
-| `ussdValue` | USSD code to dial (e.g. `*100#`) |
+| `ussdValue` | USSD code to dial (e.g. `*825#`) or menu option (`1`) |
 | `ussdStatusInput` | `ussd` (normal send) or `menu` (interactive session) |
 | `ussdCancelInput` | `0` = send, `1` = cancel session |
 | `selectMenuValue` | chosen option number during an interactive USSD menu |
@@ -86,7 +86,20 @@ Device restarts (connection drops, then returns).
 
 The response re-renders `ussd.htm` with a `ussdStatus` flag:
 `0` = idle/send form, `1` = interactive menu (result is a numbered list),
-`2` = final result text. The result is embedded in the returned HTML.
+`2` = final result text. The result is embedded in the returned HTML:
+`ussd_result_id` wraps `ussd_menu_id`, and menu options are separated by
+`<br>` (so they must be kept as separate lines when scraping).
+
+Notes:
+- Replies to an open menu are sent with `ussdStatusInput=ussd` and the option
+  (e.g. `1`) in `ussdValue`; the session stays open and the page keeps
+  `ussdStatus = '1'`.
+- Cancelling an open session is
+  `ussdValue=&selectMenuValue=&ussdStatusInput=menu&ussdCancelInput=1`;
+  afterwards `ussdStatus` returns to `0`.
+- If a new dial is sent while an old session is still open, the device displays
+  the literal text `Unexpected Data Value` in the menu div instead of a carrier
+  response. Cancelling first avoids this.
 
 ### SMS inbox (read-only)
 `GET /sms_inbox.htm` returns the whole inbox embedded in a JavaScript
