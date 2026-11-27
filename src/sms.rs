@@ -154,6 +154,86 @@ fn one_line(content: &str) -> String {
     content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Render messages as one block per message, with the body wrapped to `width`.
+///
+/// The text is the full body the device exposes (see the truncation note in
+/// `docs/router-api.md`); only whitespace runs are normalised for wrapping.
+pub fn render_full(messages: &[Message], width: usize) -> String {
+    if messages.is_empty() {
+        return "No SMS messages on the device.".to_string();
+    }
+
+    let mut out = String::new();
+    for (i, m) in messages.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let header = format!(
+            "[{}] {} {} {}",
+            m.index,
+            m.time,
+            m.number,
+            if m.unread { "unread" } else { "read" }
+        );
+        for line in wrap(&header, width, "") {
+            out.push_str(&line);
+            out.push('\n');
+        }
+
+        let body = one_line(&m.content);
+        if body.is_empty() {
+            out.push_str("  (empty)\n");
+        } else {
+            for line in wrap(&body, width, "  ") {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// Greedy word wrap with a fixed indent; over-long words are hard-split.
+fn wrap(text: &str, width: usize, indent: &str) -> Vec<String> {
+    let avail = width.max(indent.chars().count() + 10) - indent.chars().count();
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut line_len = 0usize;
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if line_len > 0 && line_len + 1 + word_len > avail {
+            lines.push(format!("{indent}{line}"));
+            line.clear();
+            line_len = 0;
+        }
+        if word_len > avail {
+            // Flush the current line first, then hard-split the long word.
+            if line_len > 0 {
+                lines.push(format!("{indent}{line}"));
+                line.clear();
+                line_len = 0;
+            }
+            let chars: Vec<char> = word.chars().collect();
+            for chunk in chars.chunks(avail) {
+                lines.push(format!("{indent}{}", chunk.iter().collect::<String>()));
+            }
+            continue;
+        }
+        if line_len > 0 {
+            line.push(' ');
+            line_len += 1;
+        }
+        line.push_str(word);
+        line_len += word_len;
+    }
+
+    if line_len > 0 {
+        lines.push(format!("{indent}{line}"));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +311,70 @@ var smsListInfo = "0}-{1}-{1065510198}-{2018-09-01 07:46:37}-{older read msg}-{|
     #[test]
     fn missing_list_is_an_error() {
         assert!(parse_inbox("<html>login page</html>").is_err());
+    }
+
+    #[test]
+    fn full_blocks_show_header_and_entire_body() {
+        let messages = last_n(&sample(), 2);
+        let text = render_full(&messages, 80);
+        let lines: Vec<&str> = text.lines().collect();
+
+        assert!(lines[0].starts_with("[10] 2026-11-26 16:16:41 CAMTEL unread"));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("[7] 2026-11-25 06:23:46 12345 unread"))
+        );
+        // Every line stays within the requested width.
+        assert!(lines.iter().all(|l| l.chars().count() <= 80), "{text}");
+        // Body is indented and text is not dropped, just re-wrapped.
+        assert!(text.contains("\n  Newest & best 'quote'\n"), "{text}");
+    }
+
+    #[test]
+    fn full_blocks_wrap_long_bodies_and_separate_messages() {
+        let messages = vec![Message {
+            index: "15,16,17".into(),
+            unread: false,
+            number: "CAMTEL".into(),
+            time: "2026-11-26 16:16:41".into(),
+            content:
+                "C'est une phrase suffisamment longue pour devoir etre coupee sur plusieurs lignes."
+                    .into(),
+        }];
+        let text = render_full(&messages, 40);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.iter().all(|l| l.chars().count() <= 40), "{text}");
+        assert!(text.contains("  C'est une phrase"));
+
+        let two = render_full(&last_n(&sample(), 2), 80);
+        assert!(
+            two.contains("\n\n"),
+            "messages are separated by a blank line"
+        );
+    }
+
+    #[test]
+    fn full_blocks_hard_split_overlong_words_and_handle_empty_body() {
+        let messages = vec![Message {
+            index: "1".into(),
+            unread: false,
+            number: "X".into(),
+            time: "2026-01-01 00:00:00".into(),
+            content: "A".repeat(95),
+        }];
+        let text = render_full(&messages, 30);
+        assert!(text.lines().all(|l| l.chars().count() <= 30), "{text}");
+        assert!(text.lines().filter(|l| l.starts_with("  A")).count() >= 4);
+
+        let empty = vec![Message {
+            index: "2".into(),
+            unread: false,
+            number: "X".into(),
+            time: "2026-01-01 00:00:00".into(),
+            content: "   ".into(),
+        }];
+        assert!(render_full(&empty, 80).contains("  (empty)"));
+        assert_eq!(render_full(&[], 80), "No SMS messages on the device.");
     }
 }
