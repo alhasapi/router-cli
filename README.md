@@ -44,6 +44,9 @@ router-cli ussd '*100#'
 # Read the last 5 received SMS messages (default: 10, newest first)
 router-cli sms list -n 5
 
+# Read them in full: one block per message, body wrapped to the terminal width
+router-cli sms list -n 5 --full
+
 # Machine-readable output for scripts
 router-cli sms list -n 50 --json | jq -r '.[] | "\(.time) \(.number): \(.content)"'
 
@@ -61,15 +64,33 @@ Global options: `--base-url`, `--username`, `--password`.
 
 ### SMS
 
-`router-cli sms list [-n N] [--json]` reads the device inbox and prints the
-newest `N` messages (default `10`) as a table of `TIME  FROM  STATUS  MESSAGE`,
-where `STATUS` is `read` or `unread`. `--json` emits an array of objects with
-`index`, `unread`, `number`, `time`, and `content` fields.
+`router-cli sms list [-n N] [-f|--full] [--json]` reads the device inbox and
+prints the newest `N` messages (default `10`) newest-first.
+
+By default it prints a table of `TIME  FROM  STATUS  MESSAGE`, where `STATUS` is
+`read` or `unread` and the body is squeezed onto one row.
+
+`-f` / `--full` prints one block per message instead:
+
+```text
+[15,16,17] 2026-11-26 16:16:41 CAMTEL read
+  Bonjour cher client. votre compte contient PrepaidBalanceSubaccount, le
+  solde est de 102.75 FCFA, ...
+```
+
+The block body is the complete text the device stores, wrapped to the terminal
+width (falls back to `COLUMNS`, then 100 columns when output is not a TTY).
+Long words are split rather than dropped. `--full` and `--json` are mutually
+exclusive.
+
+`--json` emits an array of objects with `index`, `unread`, `number`, `time`, and
+`content` fields; the content is always the full stored body (never wrapped).
 
 This is read-only: fetching the inbox does not mark messages as read, and the
-command cannot send or delete messages. Note that the router only exposes each
-message's first ~160 characters per SMS part, so `content` can be truncated by
-the device.
+command cannot send or delete messages. Note that the router only stores ~160
+characters per SMS part, so `content` (and `--full` output) can end mid-sentence
+for messages the device itself truncated — that text is not available over the
+web interface.
 
 ### Config sections
 

@@ -60,8 +60,11 @@ enum SmsAction {
         #[arg(short = 'n', long = "number", default_value_t = 10)]
         count: usize,
         /// Emit JSON instead of a table.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "full")]
         json: bool,
+        /// Print each message as a block with its full stored body.
+        #[arg(short = 'f', long, conflicts_with = "json")]
+        full: bool,
     },
 }
 
@@ -172,11 +175,11 @@ fn cmd_config(session: &Session, action: ConfigAction) -> anyhow::Result<()> {
 
 fn cmd_sms(session: &Session, action: SmsAction) -> anyhow::Result<()> {
     match action {
-        SmsAction::List { count, json } => sms_list(session, count, json),
+        SmsAction::List { count, json, full } => sms_list(session, count, json, full),
     }
 }
 
-fn sms_list(session: &Session, count: usize, json: bool) -> anyhow::Result<()> {
+fn sms_list(session: &Session, count: usize, json: bool, full: bool) -> anyhow::Result<()> {
     let body = session.get("/sms_inbox.htm").context("loading SMS inbox")?;
 
     if body.contains("parent.location='/login.htm'") {
@@ -187,10 +190,21 @@ fn sms_list(session: &Session, count: usize, json: bool) -> anyhow::Result<()> {
 
     if json {
         println!("{}", serde_json::to_string_pretty(&messages)?);
+    } else if full {
+        println!("{}", sms::render_full(&messages, terminal_width()));
     } else {
         println!("{}", sms::render_table(&messages));
     }
     Ok(())
+}
+
+/// Terminal width for wrapping `--full` blocks, with a sane non-TTY default.
+fn terminal_width() -> usize {
+    terminal_size::terminal_size()
+        .map(|(terminal_size::Width(w), _)| w as usize)
+        .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
+        .unwrap_or(100)
+        .max(20)
 }
 
 /// Map a section name to its settings page and form action.
@@ -279,25 +293,51 @@ mod tests {
     fn sms_list_defaults_to_ten_and_table() {
         let cli = Cli::try_parse_from(["router-cli", "sms", "list"]).unwrap();
         let Command::Sms {
-            action: SmsAction::List { count, json },
+            action: SmsAction::List { count, json, full },
         } = cli.command
         else {
             panic!("expected sms list");
         };
         assert_eq!(count, 10);
         assert!(!json);
+        assert!(!full);
     }
 
     #[test]
     fn sms_list_accepts_short_n_and_json() {
         let cli = Cli::try_parse_from(["router-cli", "sms", "list", "-n", "3", "--json"]).unwrap();
         let Command::Sms {
-            action: SmsAction::List { count, json },
+            action: SmsAction::List { count, json, full },
         } = cli.command
         else {
             panic!("expected sms list");
         };
         assert_eq!(count, 3);
         assert!(json);
+        assert!(!full);
+    }
+
+    #[test]
+    fn sms_list_full_flag_is_short_or_long() {
+        for args in ["-f", "--full"] {
+            let cli = Cli::try_parse_from(["router-cli", "sms", "list", "-n", "2", args]).unwrap();
+            let Command::Sms {
+                action: SmsAction::List { count, full, .. },
+            } = cli.command
+            else {
+                panic!("expected sms list");
+            };
+            assert_eq!(count, 2);
+            assert!(full);
+        }
+    }
+
+    #[test]
+    fn sms_list_full_and_json_conflict() {
+        let err = match Cli::try_parse_from(["router-cli", "sms", "list", "--full", "--json"]) {
+            Ok(_) => panic!("--full and --json should conflict"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

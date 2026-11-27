@@ -118,7 +118,15 @@ Mobile network → SMS (`lte.htm`).
 Reading a single message (which does mark it read) is
 `POST /boafrm/formSmsManage` with `action_id=readMsg`,
 `action_value=<index>`, `submit-url=/sms_inbox.htm` — deliberately not used by the
-CLI yet.
+CLI. It only flips `stat` to `1` and redirects back to the list; it does not
+return a larger body.
+
+There is no detail endpoint: `sms_read.htm`, `sms_view.htm`, `sms_detail.htm`,
+`sms_msg.htm`, `/sms_inbox.htm?index=<i>`, and `readMsg`/`getMsg`/`viewMsg`
+variants either 404/400 or only mark the message read. The `smsListInfo` string
+above is therefore the only source of message text over HTTP — the CLI's
+`--full` flag re-wraps that text, it cannot recover characters the firmware
+truncated.
 
 Deleting uses the same action with `action_id=delete` and a comma-separated
 `action_value` of indices.
